@@ -1,2 +1,3 @@
 *_audit*
 *.tgz
+.release-notes.md
