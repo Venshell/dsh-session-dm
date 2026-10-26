@@ -1,0 +1,11 @@
+# dsh-session-dm: host-plane tool row.
+#
+# It is inserted at the host plane (like tool-working-directory) rather than into
+# a preset, so every Session of this profile sees the same `session_dm_send`
+# tool regardless of which agent preset it runs.
+#
+# Placed here because the plugin lives in the workspace and the profile patch
+# only needs one line; this bundle layer is the portable form of that line.
+- insert:
+    - id: session-dm
+      name: 'dsh-session-dm'
