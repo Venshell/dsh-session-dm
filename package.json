@@ -1,11 +1,44 @@
 {
   "name": "dsh-session-dm",
   "version": "0.2.0",
-  "private": true,
-  "type": "module",
   "description": "Cross-session tools for DeepSeek Harness: let one agent Session message another (session_dm_send) or start a fresh top-level Session in the same workspace (session_create)",
   "license": "GPL-3.0",
+  "type": "module",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "bundle",
+    "session",
+    "cross-session",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Venshell/dsh-session-dm.git"
+  },
+  "homepage": "https://github.com/Venshell/dsh-session-dm#readme",
+  "bugs": {
+    "url": "https://github.com/Venshell/dsh-session-dm/issues"
+  },
+  "author": "Venshell",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
