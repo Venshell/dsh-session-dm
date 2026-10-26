@@ -1,11 +1,47 @@
-# dsh-session-dm: host-plane tool row.
+# dsh-session-dm: host-plane tool row + cross-session read-back enablement.
 #
-# It is inserted at the host plane (like tool-working-directory) rather than into
-# a preset, so every Session of this profile sees the same `session_dm_send`
-# tool regardless of which agent preset it runs.
+# This bundle patch does THREE things, in order:
 #
-# Placed here because the plugin lives in the workspace and the profile patch
-# only needs one line; this bundle layer is the portable form of that line.
+# 1. `insert` adds the plugin itself at the host plane (like tool-working-
+#    directory) rather than into a preset, so EVERY Session of the profile
+#    sees `session_dm_send` / `session_create` regardless of preset.
+#
+# 2. `insert` adds the built-in read-back tool row `tool-session-query`
+#    (@deepseek-ai/dsh-tool-session-query: session_search, session_event_search,
+#    session_trace, session_event_trace, session_event_read). That package is
+#    opt-in and ships in NO default layer, so without this row the two tools
+#    above still DELIVER but the model has no way to read the other Session's
+#    reply back. The row uses the conventional id so a profile layer can
+#    target or override it later.
+#    ⚠ The loader does NOT dedupe inserts (applyEntryPatches appends
+#    unconditionally). If YOUR profile layer already inserts a row with this
+#    id, remove the insert block below — two mounts of the same tool package
+#    would register the same tools twice.
+#
+# 3. `session-query-sqlite` is an override patch (id + config, no insert).
+#    The shared SQLite search backend ships in EVERY default layer with
+#    `openAt: never`: the ctx.sessionQuery service stays mounted (exact reads
+#    and titles work — that is all message delivery needs) but content search
+#    is closed, so session_search / session_event_search would answer
+#    SESSION_QUERY_SEARCH_DISABLED. Overriding `openAt` to `first-search`
+#    with a durable path under the harness cache opens content search on
+#    first use. The row exists everywhere, so this override is idempotent; a
+#    later layer (the profile's own cordis.patch.yml) wins if it overrides
+#    too. It also makes CONTENT SEARCH available profile-wide — that is the
+#    documented deployment-level way to turn it on, but delete this patch
+#    entry if you want search kept off.
+#
+# Loader semantics this relies on (cordis loader, applyEntryPatches): inserts
+# append unconditionally and are indexed as added; id-targeted patches replace
+# the named fields (config is replaced wholesale) and are warned + skipped
+# when the target row does not exist.
 - insert:
     - id: session-dm
       name: 'dsh-session-dm'
+    - id: tool-session-query
+      name: '@deepseek-ai/dsh-tool-session-query'
+- id: session-query-sqlite
+  name: '@deepseek-ai/dsh-session-query-sqlite'
+  config:
+    path: !!js dshHomePath('cache', 'session-search.db')
+    openAt: first-search

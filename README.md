@@ -11,6 +11,23 @@ DeepSeek Harness ships read-only seams for cross-session work: `session_search` 
 
 Both tools return a delivery receipt confirming **acceptance, not a reply** — the model reads the other Session's answer back later with the built-in `session_search` / `session_event_read`.
 
+## What the bundle enables for you
+
+A DeepSeek Harness profile is a stack of layers: shipped default config, then bundle patch layers (one per installed bundle, in `dsh.profile.bundles` order), then your profile's own `cordis.patch.yml`, then `--patch` overlays. This plugin's `cordis.patch.yml` uses that mechanism so that installing the bundle turns on everything cross-session work needs — including components that ship **disabled or absent** in every default layer:
+
+| Component | Shipped state | What this bundle does |
+|---|---|---|
+| `dsh-session-dm` itself | absent | `insert` at the host plane: every Session sees the two tools regardless of agent preset |
+| `@deepseek-ai/dsh-tool-session-query` | **absent** — opt-in package, shipped in no default layer | `insert` with the conventional row id `tool-session-query`: mounts the five built-in read-back tools (`session_search`, `session_event_search`, `session_trace`, `session_event_trace`, `session_event_read`) so the model can actually read another Session's reply |
+| `@deepseek-ai/dsh-session-query-sqlite` | present in every default layer but **search closed** (`openAt: never`: service mounted, exact reads only; content search answers `SESSION_QUERY_SEARCH_DISABLED`) | id-targeted override (idempotent — the row exists everywhere): `openAt: first-search` + a durable path at `<home>/cache/session-search.db`, so content search opens on first use |
+
+Two notes on that table:
+
+- **`session-query-sqlite` override side effects.** Opening `openAt` turns on SQLite FTS **content search profile-wide**, not just for this plugin — the sidebar search and any other consumer of `ctx.sessionQuery` see it too. That is the documented deployment-level way to enable search; if you want it kept off, delete the `session-query-sqlite` patch entry from the bundle's `cordis.patch.yml`. The two tools still deliver fine without it (receipts read titles, which work under `openAt: never`); you only lose the model's ability to *search* history.
+- **The loader does not dedupe inserts.** If your profile layer already inserts its own `tool-session-query` row (a common hand-rolled enablement before this bundle existed), remove **one** of the two — two mounts would register the same five tools twice. A profile-layer row with the same id does NOT conflict with the bundle's override entries: later layers win, so profile overrides of `openAt`/`path` take precedence.
+
+`session_dm_send` / `session_create` additionally consume host services that every deployment already mounts (`sessionController`, `sessions`, `systemPrompt`, `tools`, and `sessionQuery` for receipt titles) — none of those need enabling.
+
 ## How it works
 
 The plugin registers no background processes, keeps no store, and adds no schema. Everything rides the Host's own session machinery:
@@ -66,7 +83,7 @@ These cost real debugging time; read them before writing your own bare-registrat
 ```
 dsh-session-dm/
 ├── index.js          # the whole plugin: two tools + system-prompt section
-├── cordis.patch.yml  # inserts one host-plane row so every Session sees the tools
+├── cordis.patch.yml  # host-plane inserts + read-back/search enablement (see above)
 ├── package.json      # bundle manifest (dsh.bundle.patch)
 ├── LICENSE           # GPL-3.0
 └── README.md
