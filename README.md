@@ -1,6 +1,6 @@
 # dsh-session-dm
 
-给 **DSH（DeepSeek Harness）** 的智能体加上跨会话能力：**往另一个会话发消息**，或**直接开一个新的顶层对话**，全程在同一个工作区里。
+给 **DSH（DeepSeek Harness）** 的智能体加上跨会话能力：**往另一个会话发消息**、**直接开一个新的顶层对话**，以及**等它跑完再继续**，全程在同一个工作区里。
 
 DSH 自带的会话能力是只读的——`session_search` / `session_event_read` 能看别的会话，`send_message` 只能到自己的子智能体树。缺的正是**顶层会话之间的写方向**，这个插件补的就是它。
 
@@ -8,8 +8,9 @@ DSH 自带的会话能力是只读的——`session_search` / `session_event_rea
 |---|---|
 | `session_dm_send` | 往同一工作区的另一个会话投递一条文本。目标没在跑 → 被这条消息唤醒；在跑 → 下一轮接住。 |
 | `session_create` | 在调用方工作区开一个**新的顶层会话**（真·新对话，不是子智能体），并带上首轮提示词。可指定标题。 |
+| `session_dm_wait` | **阻塞到另一个会话跑完当前回合**，返回结束原因或失败信息。发完活直接等它，不用 `sleep` 猜。 |
 
-两个工具返回的都是「**已受理**」回执，不是对方的回答——要读回复，用内建的 `session_search` / `session_event_read`。
+前两个返回的是「**已受理**」回执，不是对方的回答。典型用法是三步走：`session_dm_send` 发活 → `session_dm_wait` 等它跑完 → `session_event_read` 读结果。
 
 [![npm](https://img.shields.io/npm/v/dsh-session-dm)](https://www.npmjs.com/package/dsh-session-dm)
 [![license](https://img.shields.io/npm/l/dsh-session-dm)](./LICENSE)
@@ -23,7 +24,11 @@ sessionController.resolveAgent(B)   ← 冷会话在这里被唤醒
    ├─ agent.followup(消息)          ← 进持久化 next-turn 收件箱
    └─ sessions.flush(session)       ← 等持久化确认才回执
    ▼
-会话 B 把这条当普通用户输入处理，产出可用 session_search 读回
+会话 B 把这条当普通用户输入处理
+   ▲
+   │ session_dm_wait({ session_id })  ← 阻塞到 turn/end，不是 sleep 猜
+   │
+会话 A 拿到「跑完了」→ session_event_read 读产出
 ```
 
 ---
@@ -134,6 +139,16 @@ profile 里装的这个插件是指向仓库目录的符号链接，所以源码
 - id 定向 patch（有 `id` 无 `insert`）替换指定字段，`config` 是**整体替换**不做深合并；目标行不存在就警告 + 跳过。
 - profile 层叠在 bundle 层之后，所以**后层胜出**。
 
+### 6. 等会话结束必须盯 `turn/end`，不能轮询 status
+
+宿主的开发者文档把话说死了：
+
+> Wait on durable events such as `turn/end` … **Do not poll `agent/status`**. `whenIdle()` does not mean one follow-up finished: several inputs can share one running interval.
+
+`session_dm_wait` 因此以 `ctx.on('session/event', …)` 订阅目标会话的 `turn/end` 为主线，`agent.whenIdle()` 只用来兜「冷唤醒后本来就无事可做」（那种情况永远不会有 `turn/end`），再加一条「seq 增长且已 idle」的低频轮询兜事件漏收。三条路都堵上，才不会出现「等到了但其实还没跑完」或者「跑完了但永远等不到」。
+
+另外：**等待期间的定时器不能 `unref()`**。`unref` 会在事件循环空转时让 Node 直接退出，挂着的 await 永远不会 settle——测试里表现为进程静默退出且没有任何输出。
+
 ---
 
 ## 兼容性
@@ -146,7 +161,7 @@ profile 里装的这个插件是指向仓库目录的符号链接，所以源码
 
 | 文件 | 作用 |
 |---|---|
-| `index.js` | 全部逻辑：两个工具 + 系统提示段落，零依赖 |
+| `index.js` | 全部逻辑：三个工具 + 系统提示段落，零依赖 |
 | `cordis.patch.yml` | host-plane 插入行 + 读回工具与内容搜索的启用（见上文「bundle 会自动启用哪些组件」） |
 | `package.json` | bundle 清单（`dsh.bundle.patch`）、`exports`、`files` 白名单 |
 | `locale/en.json`、`locale/zh.json` | 插件管理器里的标题与描述 |
@@ -174,7 +189,7 @@ node --input-type=module -e "const m = await import('./index.js'); const regs=[]
 
 ## English
 
-**Cross-session tools for DeepSeek Harness** — let one agent Session message another, or start a fresh top-level conversation, inside the same workspace.
+**Cross-session tools for DeepSeek Harness** — let one agent Session message another, start a fresh top-level conversation, and **wait for it to finish** instead of sleeping — all inside the same workspace.
 
 DeepSeek Harness ships read-only seams for cross-session work: `session_search` / `session_event_read` can look into other Sessions, and `send_message` reaches only a caller's own subagent tree. The missing direction is writing between **top-level** Sessions — this plugin adds it.
 
@@ -182,8 +197,9 @@ DeepSeek Harness ships read-only seams for cross-session work: `session_search` 
 |---|---|
 | `session_dm_send` | Deliver a text message into another Session of the same workspace. A cold target is resumed by the message; a live one picks it up next turn. |
 | `session_create` | Start a NEW top-level Session (a fresh conversation, never a subagent) in the caller's workspace and deliver a first prompt to it. Optional title. |
+| `session_dm_wait` | Block until another Session finishes its current turn, returning the end reason or the failure. Use it instead of sleeping after handing off work. |
 
-Both return a receipt confirming **acceptance, not a reply** — read the other Session's answer back with the built-in `session_search` / `session_event_read`.
+The first two return a receipt confirming **acceptance, not a reply**. The usual loop is three steps: `session_dm_send` hands off the work → `session_dm_wait` blocks until it lands → `session_event_read` reads the result.
 
 ### Install
 
@@ -226,6 +242,7 @@ Zero dependencies — the only import is `node:crypto`.
 3. **Workspace attachment needs `workspaceId`, exclusively with `cwd`.** A bare `{ cwd }` mint skips `workspace.attachSession` and shows up ungrouped; passing both is a hard error.
 4. **ESM cache survives file edits.** The profile install is a symlink to the checkout, but the running host keeps the old module — every change needs a restart.
 5. **Loader patch semantics.** `insert` appends unconditionally (no dedupe, indexed for later patches in the same list); id-targeted patches replace named fields wholesale and are skipped with a warning when the target is missing; later layers win.
+6. **Waiting on a Session means `turn/end`, not status polling.** The host's own developer docs are explicit: wait on durable events such as `turn/end`, **do not poll `agent/status`** — and `whenIdle()` is not "one follow-up finished", because several queued inputs share one running interval. `session_dm_wait` subscribes to `session/event` for the target's `turn/end`, uses `whenIdle()` only to cover a cold target that has nothing pending (no `turn/end` will ever arrive), and adds a low-frequency "seq advanced and idle" poll for frames the listener missed. Also: **never `unref()` the timers of an active wait** — an unref'd timer lets Node exit while the await is still pending, so the wait hangs with no output.
 
 ### Compatibility
 

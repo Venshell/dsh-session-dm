@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Session DM",
-    "description": "Cross-session tools: message another Session in the same workspace, or start a fresh top-level conversation with a first prompt. Installs the read-back search tools and opens session content search."
+    "description": "Cross-session tools: message another Session in the same workspace, start a fresh top-level conversation with a first prompt, or block until another Session finishes its turn. Installs the read-back search tools and opens session content search."
   }
 }

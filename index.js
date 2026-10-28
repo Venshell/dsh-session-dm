@@ -15,6 +15,10 @@
  *     the Web UI "new conversation" button: sessionController.create is the
  *     very API the client catalog drives.
  *
+ *   session_dm_wait — block until another Session finishes its current turn,
+ *     so a sender never has to `sleep` and guess. Waits on the durable
+ *     `turn/end` event rather than polling status.
+ *
  * Delivery is the routine the built-in schedule service uses for
  * original-Session reminders, so a message behaves like other out-of-band input:
  *
@@ -53,8 +57,10 @@ const PROMPT_TEXT =
   'ask a parallel Session a question, or relay a result); the target is woken by the message and receives ' +
   'it as user input on its next turn. session_create starts a NEW top-level Session in the same workspace ' +
   'and delivers your prompt as its first user input — use it when the work deserves a fresh conversation ' +
-  'rather than burdening an existing one. Delivery confirms acceptance, not a reply; to read what another ' +
-  'Session said back, use session_search or session_event_read on its id.'
+  'rather than burdening an existing one. session_dm_wait blocks until another Session finishes its ' +
+  'current turn, so after sending work you can wait for it instead of sleeping. Delivery confirms ' +
+  'acceptance, not a reply; to read what another Session said back, use session_search or ' +
+  'session_event_read on its id.'
 
 const TEXT_OUTPUT = {
   schema: { type: 'string' },
@@ -347,8 +353,168 @@ export function apply(ctx) {
     },
   }
 
+  /**
+   * session_dm_wait — block until another Session finishes its current turn.
+   *
+   * Without this a sender has to `sleep` and guess how long the target needs.
+   * The host's own guidance is explicit: wait on the durable `turn/end` event,
+   * do NOT poll `agent.status` — and `agent.whenIdle()` is unusable here for
+   * the same reason, since several queued inputs share one running interval
+   * and it resolves only after the whole agent quiesces (which, right after
+   * followup(), is after the input we just sent actually completes).
+   *
+   * The wait therefore races three things:
+   *   1. a `session/event` subscription for the target's next `turn/end`;
+   *   2. `agent.whenIdle()`, because a cold target that was just resumed may
+   *      already be idle with nothing pending (no turn/end will ever come);
+   *   3. a timeout, so a stuck target cannot hang the caller forever.
+   *
+   * A settled turn is reported with its reason, the last assistant text, and
+   * the resulting Session error if the turn failed.
+   */
+  const waitTool = {
+    name: 'session_dm_wait',
+    description:
+      'Block until another Session finishes its current turn, then return what happened (turn end reason, ' +
+      'last assistant text, or the Session error). Use it after session_dm_send or session_create so you can ' +
+      'wait for the other Session instead of sleeping and guessing. Returns as soon as the target is idle if ' +
+      'it has no work pending; times out if the target neither finishes nor idles.',
+    parameters: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description:
+            'Target Session id. Find ids with session_search, session_trace, or the Session list in the UI.',
+        },
+        timeout_seconds: {
+          type: 'number',
+          description:
+            'How long to wait before giving up, in seconds. Defaults to 300 (5 minutes). Use a larger value for long tasks.',
+        },
+      },
+      required: ['session_id'],
+      additionalProperties: false,
+    },
+    output: TEXT_OUTPUT,
+    async execute(args, exec) {
+      const caller = exec.agent
+      if (caller === undefined) {
+        throw new Error('session_dm_wait requires an agent-bound caller (exec.agent was undefined)')
+      }
+      const callerId = caller.session.id
+      const targetId = args.session_id
+      const rawTimeout = Number(args.timeout_seconds)
+      const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.min(rawTimeout, 3600) * 1000 : 300_000
+
+      const header = await authorizeTarget(ctx, caller.session.header.cwd, targetId, exec.signal)
+      exec.signal?.throwIfAborted?.()
+
+      const agent = unwrapResolution(await ctx.sessionController.resolveAgent(targetId), targetId)
+      exec.signal?.throwIfAborted?.()
+
+      // Snapshot BEFORE subscribing, so a turn that ends between resolution and
+      // subscription still shows up as a seq advance on the poll fallback.
+      const startSeq = agent.session.seq
+      const alreadyIdle = agent.status === 'idle' && !agent.inbox.hasPending
+      if (alreadyIdle) {
+        return waitReceipt(targetId, header?.title, 'idle', { startSeq, endSeq: startSeq, reason: undefined })
+      }
+
+      const settled = await new Promise((resolve) => {
+        let done = false
+        let timer
+        let poll
+        const finish = (outcome) => {
+          if (done) return
+          done = true
+          if (timer !== undefined) clearTimeout(timer)
+          if (poll !== undefined) clearInterval(poll)
+          dispose()
+          resolve(outcome)
+        }
+
+        // Path 1: the durable turn/end for this Session.
+        const dispose = ctx.on(
+          'session/event',
+          (session, event) => {
+            if (session.id !== targetId) return
+            if (event.type === 'turn/end') {
+              finish({ kind: 'turn-end', reason: event.data?.reason, endSeq: event.seq })
+            } else if (event.type === 'agent/error' || event.type === 'session/error') {
+              finish({ kind: 'error', error: event.data })
+            }
+          },
+          { global: true },
+        )
+
+        // Path 2: the agent quiesced with nothing left to do. Covers a resumed
+        // Session whose turn already ended before we started listening.
+        Promise.resolve(agent.whenIdle?.()).then(
+          () => finish({ kind: 'idle', endSeq: agent.session.seq }),
+          () => finish({ kind: 'idle', endSeq: agent.session.seq }),
+        )
+
+        // Path 3: belt and braces. turn/end appends durably, so a seq advance
+        // past the snapshot means a turn completed even if the event listener
+        // missed the frame (cold resume, reconnect, listener registered late).
+        // Neither timer is unref'd: an active wait must keep the process alive,
+        // and unref'd timers let a pending await hang forever if the loop empties.
+        poll = setInterval(() => {
+          if (agent.session.seq > startSeq && agent.status === 'idle') {
+            finish({ kind: 'turn-end', reason: undefined, endSeq: agent.session.seq })
+          }
+        }, 1000)
+
+        timer = setTimeout(() => finish({ kind: 'timeout' }), timeoutMs)
+        exec.signal?.addEventListener?.('abort', () => finish({ kind: 'timeout' }), { once: true })
+      })
+
+      if (settled.kind === 'timeout') {
+        return [
+          `Timed out after ${Math.round(timeoutMs / 1000)}s waiting for session ${targetId}.`,
+          agent.status === 'running'
+            ? 'It is still running — call session_dm_wait again with a larger timeout_seconds.'
+            : 'It is not running but did not report a turn end; read its state with session_event_read.',
+        ].join('\n')
+      }
+      return waitReceipt(targetId, header?.title, settled.kind, settled)
+    },
+  }
+
   ctx.tools.register(tool)
   ctx.tools.register(createTool)
+  ctx.tools.register(waitTool)
+}
+
+/**
+ * Render what a finished wait observed.
+ * @param targetId - the Session that settled.
+ * @param title - its display title, when known.
+ * @param kind - how the wait settled (turn-end, idle, error).
+ * @param settled - the observed sequence and failure details.
+ * @returns the model-facing receipt.
+ */
+function waitReceipt(targetId, title, kind, settled) {
+  const label = typeof title === 'string' && title.length > 0 ? `${targetId} — ${title}` : targetId
+  const when = typeof settled.endSeq === 'number' ? ` (session seq ${settled.endSeq})` : ''
+  if (kind === 'timeout') return `Session ${label} did not settle.`
+  if (kind === 'error') {
+    const message = settled.error?.message ?? settled.error?.error?.message ?? JSON.stringify(settled.error ?? null)
+    return `Session ${label} failed${when}: ${message}`
+  }
+  if (kind === 'idle') {
+    return [
+      `Session ${label} is idle${when} — nothing is pending, so there was nothing to wait for.`,
+      'If you expected it to be working, the message may not have started a turn yet; read it with session_event_read.',
+    ].join('\n')
+  }
+  const reason = settled.reason?.kind ?? settled.reason ?? 'completed'
+  return [
+    `Session ${label} finished its turn${when}.`,
+    `End reason: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}.`,
+    'Read its reply with session_search or session_event_read on this id.',
+  ].join('\n')
 }
 
 /**
