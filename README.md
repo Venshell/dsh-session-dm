@@ -6,9 +6,17 @@ DSH 自带的会话能力是只读的——`session_search` / `session_event_rea
 
 | 工具 | 作用 |
 |---|---|
-| `session_dm_send` | 往同一工作区的另一个会话投递一条文本。目标没在跑 → 被这条消息唤醒；在跑 → 下一轮接住。 |
+| `session_dm_send` | 往同一工作区的另一个会话投递一条文本。`mode: "queue"`（默认）排队等下一回合；`mode: "steer"` **插队**——目标正在跑回合时直接插进当前回合，模型下一步就读到。 |
 | `session_create` | 在调用方工作区开一个**新的顶层会话**（真·新对话，不是子智能体），并带上首轮提示词。可指定标题。 |
 | `session_dm_wait` | **阻塞到另一个会话跑完当前回合**，返回结束原因或失败信息。发完活直接等它，不用 `sleep` 猜。 |
+
+**排队 vs 插队**（对齐宿主输入框自己的 `beginSubmission` 逻辑——只有目标正在跑回合时两者才有区别）：
+
+| 目标状态 | `mode: "queue"` | `mode: "steer"` |
+|---|---|---|
+| 正在跑回合 | 排进队列，当前回合结束后模型才读到 | **插入当前回合**，模型下一步就读到 |
+| 空闲 | 立即开新回合 | 回落为排队（立即开新回合），回执说明发生了回落 |
+| 冷会话 | 唤醒后开新回合 | 同左 |
 
 前两个返回的是「**已受理**」回执，不是对方的回答。典型用法是三步走：`session_dm_send` 发活 → `session_dm_wait` 等它跑完 → `session_event_read` 读结果。
 
@@ -195,9 +203,17 @@ DeepSeek Harness ships read-only seams for cross-session work: `session_search` 
 
 | Tool | What it does |
 |---|---|
-| `session_dm_send` | Deliver a text message into another Session of the same workspace. A cold target is resumed by the message; a live one picks it up next turn. |
+| `session_dm_send` | Deliver a text message into another Session of the same workspace. `mode: "queue"` (default) waits for the target's next turn; `mode: "steer"` **interjects** into the target's current turn while it is running, so the model reads it at its next step. |
 | `session_create` | Start a NEW top-level Session (a fresh conversation, never a subagent) in the caller's workspace and deliver a first prompt to it. Optional title. |
 | `session_dm_wait` | Block until another Session finishes its current turn, returning the end reason or the failure. Use it instead of sleeping after handing off work. |
+
+**Queue vs steer** (mirrors the host composer's own `beginSubmission` logic — the two differ only while the target is mid-turn):
+
+| Target state | `mode: "queue"` | `mode: "steer"` |
+|---|---|---|
+| Running a turn | Queued; the model reads it when the current turn ends | **Interjected into the current turn**, read at the model's next step |
+| Idle | Starts the next turn immediately | Falls back to queue (starts the next turn immediately); the receipt says so |
+| Cold | Resumed, then starts a turn | Same |
 
 The first two return a receipt confirming **acceptance, not a reply**. The usual loop is three steps: `session_dm_send` hands off the work → `session_dm_wait` blocks until it lands → `session_event_read` reads the result.
 

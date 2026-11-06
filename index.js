@@ -54,13 +54,14 @@ const SOURCE_KIND = 'session-dm'
 /** Short model guidance; one stable section keeps the request prefix cacheable. */
 const PROMPT_TEXT =
   'Cross-session tools: session_dm_send messages another Session in the same workspace (hand off work, ' +
-  'ask a parallel Session a question, or relay a result); the target is woken by the message and receives ' +
-  'it as user input on its next turn. session_create starts a NEW top-level Session in the same workspace ' +
-  'and delivers your prompt as its first user input — use it when the work deserves a fresh conversation ' +
-  'rather than burdening an existing one. session_dm_wait blocks until another Session finishes its ' +
-  'current turn, so after sending work you can wait for it instead of sleeping. Delivery confirms ' +
-  'acceptance, not a reply; to read what another Session said back, use session_search or ' +
-  'session_event_read on its id.'
+  'ask a parallel Session a question, or relay a result). Its mode decides placement: queue waits for the ' +
+  "target's next turn, steer interjects into the target's current turn while it is running (read at the " +
+  "model's next step; falls back to queue when the target is idle). session_create starts a NEW top-level " +
+  'Session in the same workspace and delivers your prompt as its first user input — use it when the work ' +
+  'deserves a fresh conversation rather than burdening an existing one. session_dm_wait blocks until ' +
+  'another Session finishes its current turn, so after sending work you can wait for it instead of ' +
+  'sleeping. Delivery confirms acceptance, not a reply; to read what another Session said back, use ' +
+  'session_search or session_event_read on its id.'
 
 const TEXT_OUTPUT = {
   schema: { type: 'string' },
@@ -140,15 +141,33 @@ function unwrapResolution(resolved, targetId) {
 }
 
 /** Render the delivery receipt the model sees. */
-function receipt(targetId, title, wasLive) {
+function receipt(targetId, title, placement) {
   const label = typeof title === 'string' && title.length > 0 ? `${targetId} — ${title}` : targetId
-  return [
-    `Delivered to session ${label}.`,
-    wasLive
-      ? "The message is queued for that Session's next turn."
-      : 'That Session was not running, so it was resumed and will handle the message on its next turn.',
-    'Delivery confirms acceptance only; read its reply later with session_search or session_event_read.',
-  ].join('\n')
+  const lines = [`Delivered to session ${label}.`]
+  switch (placement) {
+    case 'steer':
+      lines.push(
+        'Steered (interjected): the message enters the CURRENT turn — the model reads it at its next step, before the turn ends.',
+      )
+      break
+    case 'queued':
+      lines.push(
+        'Queued: the target is mid-turn, so the message waits and the model reads it when the current turn ends and the next one opens.',
+      )
+      break
+    case 'steer-fallback':
+      lines.push(
+        'Steer was requested, but the target has no turn in flight, so it was queued instead: the message starts its next turn directly.',
+      )
+      break
+    case 'awake':
+      lines.push('The target is idle, so the message starts its next turn immediately.')
+      break
+    default:
+      lines.push('That Session was not running, so it was resumed and will handle the message on its next turn.')
+  }
+  lines.push('Delivery confirms acceptance only; read its reply later with session_search or session_event_read.')
+  return lines.join('\n')
 }
 
 /**
@@ -192,9 +211,9 @@ export function apply(ctx) {
   const tool = {
     name: 'session_dm_send',
     description:
-      'Send a text message into another Session in the same workspace. The target Session is resumed if ' +
-      'needed and receives the message as user input on its next turn. Use it to hand off work to a ' +
-      'parallel Session or to ask one a question; the receipt confirms acceptance, not an answer.',
+      'Send a text message into another Session in the same workspace. mode "queue" (default) waits for the ' +
+      "target's next turn; mode \"steer\" interjects into the target's CURRENT turn while it is running, so " +
+      'the model reads it at its next step. The receipt confirms acceptance, not an answer.',
     // 🔴 必须是**完整 JSON Schema**（type/properties/required/additionalProperties），
     //    不能写宿主 defineTool 的简写格式（`{ field: { type, required: true } }`）：
     //    本插件为保持零依赖没有走 defineTool，裸注册时没有任何一层做 spec→JSONSchema
@@ -214,6 +233,14 @@ export function apply(ctx) {
           description:
             'Message text to deliver. Write it as the human-facing input the target Session should act on.',
         },
+        mode: {
+          type: 'string',
+          enum: ['queue', 'steer'],
+          description:
+            "queue (default): the message waits for the target's next turn (an idle target starts one immediately). " +
+            'steer: interject into the CURRENT turn while the target is running — the model reads it at its next step, ' +
+            'before the turn ends. A steer against a target that is not running falls back to queue automatically.',
+        },
       },
       required: ['session_id', 'message'],
       additionalProperties: false,
@@ -228,6 +255,7 @@ export function apply(ctx) {
       const targetId = args.session_id
       const text = typeof args.message === 'string' ? args.message.trim() : ''
       if (text.length === 0) throw new Error('session_dm_send requires a non-empty message')
+      const wantsSteer = args.mode === 'steer'
       if (targetId === callerId) {
         throw new Error(
           'session_dm_send cannot address the calling Session; reply in place instead of messaging yourself',
@@ -240,18 +268,40 @@ export function apply(ctx) {
       const wasLive = ctx.sessions.get(targetId) !== undefined
       const agent = unwrapResolution(await ctx.sessionController.resolveAgent(targetId), targetId)
 
-      agent.followup(buildUserMessage(text, callerId))
+      // Placement mirrors the host's own composer logic (beginSubmission):
+      // steer vs queue only differ while the agent is mid-turn — an idle
+      // agent turns both into a plain next-turn message. Steering is
+      // therefore only issued against a running agent; anything else is a
+      // followup, and the receipt says which placement actually happened.
+      const running = agent.status === 'running'
+      const message = buildUserMessage(text, callerId)
+      let placement
+      if (wantsSteer && running) {
+        agent.steer(message)
+        placement = 'steer'
+      } else if (running) {
+        agent.followup(message)
+        placement = 'queued'
+      } else if (wasLive) {
+        agent.followup(message)
+        placement = wantsSteer ? 'steer-fallback' : 'awake'
+      } else {
+        agent.followup(message)
+        placement = 'resumed'
+      }
 
       const acknowledged = await ctx.sessions.flush(agent.session)
       if (!acknowledged) {
         throw new Error(`delivery to session "${targetId}" was not acknowledged by persistence`)
       }
-      ctx.logger?.info?.(`session-dm: ${callerId} -> ${targetId} (${text.length} chars, live=${wasLive})`)
+      ctx.logger?.info?.(
+        `session-dm: ${callerId} -> ${targetId} (${text.length} chars, mode=${args.mode ?? 'queue'}, placement=${placement})`,
+      )
 
       const title = ctx.sessionQuery
         ? (await safeTitle(ctx, targetId)) ?? agent.session.header?.title
         : agent.session.header?.title
-      return receipt(targetId, title, wasLive)
+      return receipt(targetId, title, placement)
     },
   }
 

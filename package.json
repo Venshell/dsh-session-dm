@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-dm",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cross-session tools for DeepSeek Harness: let one agent Session message another (session_dm_send) or start a fresh top-level Session in the same workspace (session_create)",
   "license": "GPL-3.0",
   "type": "module",
