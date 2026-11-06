@@ -9,6 +9,7 @@ DSH 自带的会话能力是只读的——`session_search` / `session_event_rea
 | `session_dm_send` | 往同一工作区的另一个会话投递一条文本。`mode: "queue"`（默认）排队等下一回合；`mode: "steer"` **插队**——目标正在跑回合时直接插进当前回合，模型下一步就读到。 |
 | `session_create` | 在调用方工作区开一个**新的顶层会话**（真·新对话，不是子智能体），并带上首轮提示词。可指定标题。 |
 | `session_dm_wait` | **阻塞到另一个会话跑完当前回合**，返回结束原因或失败信息。发完活直接等它，不用 `sleep` 猜。 |
+| `session_model` | **查看或切换另一个会话的 provider/model**。切走限时限量的 provider、把负载挪到别的通道——对正在跑回合的目标也生效（下一个请求起用新路由）。 |
 
 **排队 vs 插队**（对齐宿主输入框自己的 `beginSubmission` 逻辑——只有目标正在跑回合时两者才有区别）：
 
@@ -206,6 +207,7 @@ DeepSeek Harness ships read-only seams for cross-session work: `session_search` 
 | `session_dm_send` | Deliver a text message into another Session of the same workspace. `mode: "queue"` (default) waits for the target's next turn; `mode: "steer"` **interjects** into the target's current turn while it is running, so the model reads it at its next step. |
 | `session_create` | Start a NEW top-level Session (a fresh conversation, never a subagent) in the caller's workspace and deliver a first prompt to it. Optional title. |
 | `session_dm_wait` | Block until another Session finishes its current turn, returning the end reason or the failure. Use it instead of sleeping after handing off work. |
+| `session_model` | Inspect or switch ANOTHER Session's provider/model — free a rate-limited provider and move a running Session to another channel. Applies from the target's next request. |
 
 **Queue vs steer** (mirrors the host composer's own `beginSubmission` logic — the two differ only while the target is mid-turn):
 

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Session DM",
-    "description": "Cross-session tools: message another Session (queued or steered into its current turn), start a fresh top-level conversation with a first prompt, or block until another Session finishes its turn. Installs the read-back search tools and opens session content search."
+    "description": "Cross-session tools: message another Session (queued or steered into its current turn), start a fresh top-level conversation with a first prompt, block until another Session finishes its turn, or switch another Session's provider/model. Installs the read-back search tools and opens session content search."
   }
 }

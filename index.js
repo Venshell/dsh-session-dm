@@ -63,7 +63,10 @@ const PROMPT_TEXT =
   "(mode: queue waits for the target's next turn; steer interjects into its current turn while running, " +
   "read at the model's next step; falls back to queue when idle). session_create starts a NEW top-level " +
   'Session in the same workspace and delivers your prompt as its first user input. session_dm_wait blocks ' +
-  'until another Session finishes its current turn. Delivery confirms acceptance, not a reply.'
+  'until another Session finishes its current turn. session_model inspects or switches ANOTHER Session\'s ' +
+  'provider/model — use it when the user asks to free a rate-limited provider and move a running Session ' +
+  'to another one; a mid-turn switch applies from the target\'s next request. Delivery confirms ' +
+  'acceptance, not a reply.'
 
 const TEXT_OUTPUT = {
   schema: { type: 'string' },
@@ -565,9 +568,126 @@ export function apply(ctx) {
     },
   }
 
+  /**
+   * session_model — inspect or switch another Session's provider/model.
+   *
+   * The user's providers are rate-limited per window, so a parallel Session
+   * mid-run can burn a quota the user needs elsewhere; switching that
+   * Session to a different provider/model is otherwise a UI-only action.
+   * Get reads the Session's request header (its durable selection);
+   * set drives the same host API the Web UI model picker drives
+   * (sessionController.selectModel), which validates the model against the
+   * live catalog, installs a Session-local selection for the NEXT request,
+   * and saves the default in the background.
+   */
+  const modelTool = {
+    name: 'session_model',
+    description:
+      'Inspect or switch the model of ANOTHER Session in the same workspace. Without provider/model, ' +
+      'returns the target\'s current selection (provider, model, reasoning effort, and whether a turn is ' +
+      'open — a mid-turn switch applies from the NEXT request). With provider/model, switches that ' +
+      'Session to the given selection via the same host API the Web UI model picker drives: the selection ' +
+      'is validated against the live catalog and applies from the target\'s next request. Use it when a ' +
+      'rate-limited provider needs freeing and another provider can take the load. This changes the OTHER ' +
+      'Session\'s model only — not yours, not the profile default.',
+    parameters: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description:
+            'Target Session id. Find ids with session_search, session_trace, or the Session list in the UI.',
+        },
+        provider: {
+          type: 'string',
+          description: 'Provider id to switch to (from session_model get, the model catalog, or the user). Omit to only inspect.',
+        },
+        model: {
+          type: 'string',
+          description: 'Model id to switch to. Required when provider is given. Omit to only inspect.',
+        },
+        reasoning_effort: {
+          type: 'string',
+          description: 'Optional reasoning effort for the new selection, when the model supports one.',
+        },
+      },
+      required: ['session_id'],
+      additionalProperties: false,
+    },
+    output: TEXT_OUTPUT,
+    async execute(args, exec) {
+      const caller = exec.agent
+      if (caller === undefined) {
+        throw new Error('session_model requires an agent-bound caller (exec.agent was undefined)')
+      }
+      const targetId = args.session_id
+      if (targetId === caller.session.id) {
+        throw new Error('session_model cannot address the calling Session; your own model is changed by the user in the UI')
+      }
+
+      const header = await authorizeTarget(ctx, caller.session.header?.cwd, targetId, 'session_model', exec.signal)
+      exec.signal?.throwIfAborted?.()
+
+      const provider = typeof args.provider === 'string' ? args.provider.trim() : ''
+      const model = typeof args.model === 'string' ? args.model.trim() : ''
+      const effort = typeof args.reasoning_effort === 'string' ? args.reasoning_effort.trim() : ''
+      if (provider.length > 0 && model.length === 0) {
+        throw new Error('session_model requires model when provider is given')
+      }
+      if (provider.length === 0 && (model.length > 0 || effort.length > 0)) {
+        throw new Error('session_model requires provider when model or reasoning_effort is given')
+      }
+
+      const label = typeof header?.title === 'string' && header.title.length > 0 ? `${targetId} — ${header.title}` : targetId
+      const describe = (sel) =>
+        sel === undefined || sel === null
+          ? 'no Session-local selection (uses the profile default)'
+          : `${sel.provider} / ${sel.model}${sel.reasoningEffort === undefined ? '' : ` (effort: ${sel.reasoningEffort})`}`
+
+      // Both paths need the live agent: get reads its request header, set
+      // reports whether the new route applies immediately or next request.
+      const agent = unwrapResolution(await ctx.sessionController.resolveAgent(targetId), targetId)
+
+      // Inspect: the durable request header records the route the last (or
+      // current) request uses; selectionFor's pending pick is not exposed on
+      // the injected surface, so the header is the observable truth.
+      if (provider.length === 0) {
+        const logged = agent?.session?.requestHeader?.()?.config
+        const current = logged
+          ? `${logged.provider} / ${logged.model}${logged.reasoningEffort === undefined ? '' : ` (effort: ${logged.reasoningEffort})`}`
+          : 'unknown (no request made yet — uses the profile default)'
+        return [
+          `Session ${label} model:`,
+          `  last/current request route: ${current}`,
+          `  catalog default: ${describe(ctx.agentDefaultModel?.currentSelection?.())} (profile-wide)`,
+        ].join('\n')
+      }
+
+      // Switch: same host API the Web UI model picker drives. It resolves the
+      // route, validates it against the live catalog, installs a Session-local
+      // selection for the target's NEXT request, and saves the default in the
+      // background.
+      const request = { sessionId: targetId, provider, model, ...(effort.length > 0 ? { reasoningEffort: effort } : {}) }
+      const result = await ctx.sessionController.selectModel(request)
+      const selected = result?.selected
+      ctx.logger?.info?.(
+        `session-dm: ${caller.session.id} set model of ${targetId} to ${describe(selected)}`,
+      )
+      const running = agent?.status === 'running'
+      return [
+        `Session ${label} model switched to ${describe(selected)}.`,
+        running
+          ? 'The target is mid-turn, so the new route applies from its NEXT request.'
+          : 'The new route applies from the target\'s next request.',
+        'The profile default was saved in the background; undo with another session_model set.',
+      ].join('\n')
+    },
+  }
+
   ctx.tools.register(tool)
   ctx.tools.register(createTool)
   ctx.tools.register(waitTool)
+  ctx.tools.register(modelTool)
 }
 
 /**
