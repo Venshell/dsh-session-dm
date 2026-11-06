@@ -57,10 +57,10 @@ dsh plugin --profile <你的 profile> add github:Venshell/dsh-session-dm
 
 ### 方式三：从 Release 附件装
 
-去 [Releases](https://github.com/Venshell/dsh-session-dm/releases) 下 `dsh-session-dm-0.2.0.tgz`：
+去 [Releases](https://github.com/Venshell/dsh-session-dm/releases) 下 `dsh-session-dm-0.4.1.tgz`：
 
 ```powershell
-dsh plugin --profile <你的 profile> add <下载路径>\dsh-session-dm-0.2.0.tgz
+dsh plugin --profile <你的 profile> add <下载路径>\dsh-session-dm-0.4.1.tgz
 ```
 
 ### 方式四：从源码目录装
@@ -82,7 +82,7 @@ DSH 的 profile 是**分层叠加**的：出厂默认层 → 各 bundle 的 patc
 
 | 组件 | 出厂状态 | 本 bundle 做什么 |
 |---|---|---|
-| `dsh-session-dm` | 不存在 | `insert` 到 host plane：**所有 preset** 的会话都看得到这两个工具 |
+| `dsh-session-dm` | 不存在 | `insert` 到 host plane：**所有 preset** 的会话都看得到三个工具 |
 | `@deepseek-ai/dsh-tool-session-query` | **不存在**——可选包，任何默认层都没有 | `insert`（常规 id `tool-session-query`）：挂上五个读回工具 `session_search` / `session_event_search` / `session_trace` / `session_event_trace` / `session_event_read`，否则模型只能发、读不回来 |
 | `@deepseek-ai/dsh-session-query-sqlite` | 每层都有，但**搜索是关的**（`openAt: never`：服务在，只支持精确读；内容搜索会答 `SESSION_QUERY_SEARCH_DISABLED`） | id 定向覆盖（幂等——这行到处都在）：`openAt: first-search` + 持久化路径 `<home>/cache/session-search.db`，首次搜索才打开 SQLite |
 
@@ -161,7 +161,7 @@ profile 里装的这个插件是指向仓库目录的符号链接，所以源码
 
 ## 兼容性
 
-在 DeepSeek Harness 0.2.x 桌面版 profile（Windows）上开发和验证。它摸的宿主接口（`sessionController.create` / `resolveAgent` / `rename`、`agent.followup`、`sessions.flush`、`workspaceRegistry.list`）都是内部缝隙，跨版本可能变——真变了代码会**大声失败**而不是静默降级。
+在 DeepSeek Harness 0.2.x 桌面版 profile（Windows）上开发和验证。它摸的宿主接口（`sessionController.create` / `resolveAgent` / `rename`、`agent.followup`、`sessions.flush`、`workspaceRegistry.list`）都是内部缝隙，跨版本可能变——真变了：核心投递/建会话路径会**大声失败**；只有三处刻意 best-effort（工作区查找、收据标题、改名）静默降级并留了回退路径。
 
 ---
 
@@ -230,7 +230,7 @@ Restart the Harness afterward — plugin modules load at boot.
 
 A profile is a stack of layers: shipped defaults, then bundle patches, then your own `cordis.patch.yml`. This plugin's patch uses that to turn on everything cross-session work needs, including components that ship disabled or absent:
 
-- **`@deepseek-ai/dsh-tool-session-query`** — inserted at the host plane. This opt-in package ships in no default layer; without it the two tools deliver but the model cannot read replies back. Provides `session_search`, `session_event_search`, `session_trace`, `session_event_trace`, `session_event_read`.
+- **`@deepseek-ai/dsh-tool-session-query`** — inserted at the host plane. This opt-in package ships in no default layer; without it the three tools deliver but the model cannot read replies back. Provides `session_search`, `session_event_search`, `session_trace`, `session_event_trace`, `session_event_read`.
 - **`@deepseek-ai/dsh-session-query-sqlite`** — overridden from `openAt: never` (content search closed) to `openAt: first-search` with a durable index under `<home>/cache/session-search.db`. Note this opens content search **profile-wide**; delete that patch entry to keep it off.
 
 The loader does not dedupe inserts: if your profile layer already inserts its own `tool-session-query` row, remove one to avoid a double mount. Profile-layer overrides still win over the bundle's (later layers win).
@@ -262,7 +262,7 @@ Zero dependencies — the only import is `node:crypto`.
 
 ### Compatibility
 
-Developed and tested against a DeepSeek Harness 0.2.x desktop profile (Windows). The host seams it touches are internal and may shift between versions — the code fails loudly rather than silently when they do.
+Developed and tested against a DeepSeek Harness 0.2.x desktop profile (Windows). The host seams it touches are internal and may shift between versions — the core delivery and creation paths fail loudly when they do; three deliberate best-effort spots (workspace lookup, receipt title, rename) degrade silently with documented fallbacks.
 
 ---
 

@@ -4,12 +4,12 @@
 #
 # 1. `insert` adds the plugin itself at the host plane (like tool-working-
 #    directory) rather than into a preset, so EVERY Session of the profile
-#    sees `session_dm_send` / `session_create` regardless of preset.
+#    sees `session_dm_send` / `session_create` / `session_dm_wait` regardless of preset.
 #
 # 2. `insert` adds the built-in read-back tool row `tool-session-query`
 #    (@deepseek-ai/dsh-tool-session-query: session_search, session_event_search,
 #    session_trace, session_event_trace, session_event_read). That package is
-#    opt-in and ships in NO default layer, so without this row the two tools
+#    opt-in and ships in NO default layer, so without this row the three tools
 #    above still DELIVER but the model has no way to read the other Session's
 #    reply back. The row uses the conventional id so a profile layer can
 #    target or override it later.

@@ -103,14 +103,16 @@ function buildUserMessage(text, fromSessionId) {
  * @param ctx - plugin context carrying the session-query service.
  * @param callerCwd - the calling Session's workspace, or undefined.
  * @param targetId - the addressed Session id.
+ * @param toolName - the calling tool's name, for accurate error messages
+ *   (session_dm_send and session_dm_wait share this gate).
  * @param signal - the tool call's cancellation signal.
  * @returns the target header.
  * @throws when the target is unknown or outside the caller's workspace.
  */
-async function authorizeTarget(ctx, callerCwd, targetId, signal) {
+async function authorizeTarget(ctx, callerCwd, targetId, toolName, signal) {
   if (callerCwd === undefined) {
     throw new Error(
-      'session_dm_send requires the calling Session to have a workspace; set a working directory first',
+      `${toolName} requires the calling Session to have a workspace; set a working directory first`,
     )
   }
   const records = await ctx.sessionQuery.filterSessions(
@@ -262,7 +264,7 @@ export function apply(ctx) {
         )
       }
 
-      await authorizeTarget(ctx, caller.session.header.cwd, targetId, exec.signal)
+      await authorizeTarget(ctx, caller.session.header?.cwd, targetId, 'session_dm_send', exec.signal)
       exec.signal?.throwIfAborted?.()
 
       const wasLive = ctx.sessions.get(targetId) !== undefined
@@ -273,12 +275,21 @@ export function apply(ctx) {
       // agent turns both into a plain next-turn message. Steering is
       // therefore only issued against a running agent; anything else is a
       // followup, and the receipt says which placement actually happened.
+      // 🔴 TOCTOU: the turn can end between the status snapshot and the steer
+      //    call (the host throws session/steer-unavailable for exactly that),
+      //    so a rejected steer FALLS BACK to followup — mode is a preference,
+      //    never a failure.
       const running = agent.status === 'running'
       const message = buildUserMessage(text, callerId)
       let placement
       if (wantsSteer && running) {
-        agent.steer(message)
-        placement = 'steer'
+        try {
+          agent.steer(message)
+          placement = 'steer'
+        } catch {
+          agent.followup(message)
+          placement = 'steer-fallback'
+        }
       } else if (running) {
         agent.followup(message)
         placement = 'queued'
@@ -362,8 +373,11 @@ export function apply(ctx) {
       // so prefer the workspaceId form and fall back to cwd only when no
       // workspace matches the caller.
       const workspace = callerWorkspace(ctx, callerId, callerCwd)
+      // Strict string check: a registry row with id: null must not leak
+      // { workspaceId: null } into the host request — the host rejects
+      // workspaceId XOR cwd, so a null id has to take the cwd path.
       const request =
-        workspace?.id !== undefined
+        typeof workspace?.id === 'string' && workspace.id.length > 0
           ? { workspaceId: workspace.id }
           : { cwd: callerCwd }
       const created = await ctx.sessionController.create(request)
@@ -455,9 +469,12 @@ export function apply(ctx) {
       const callerId = caller.session.id
       const targetId = args.session_id
       const rawTimeout = Number(args.timeout_seconds)
-      const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.min(rawTimeout, 3600) * 1000 : 300_000
+      // Floor of 1s keeps the poll fallback meaningful; the ceiling guards
+      // against a model passing Infinity-adjacent values.
+      const timeoutMs =
+        Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.min(Math.max(rawTimeout, 1), 3600) * 1000 : 300_000
 
-      const header = await authorizeTarget(ctx, caller.session.header.cwd, targetId, exec.signal)
+      const header = await authorizeTarget(ctx, caller.session.header?.cwd, targetId, 'session_dm_wait', exec.signal)
       exec.signal?.throwIfAborted?.()
 
       const agent = unwrapResolution(await ctx.sessionController.resolveAgent(targetId), targetId)
@@ -471,6 +488,13 @@ export function apply(ctx) {
         return waitReceipt(targetId, header?.title, 'idle', { startSeq, endSeq: startSeq, reason: undefined })
       }
 
+      // agent.whenIdle() is deliberately NOT armed here. It resolves only at
+      // full quiescence, so with several queued inputs it would overshoot past
+      // the turn we care about and mislabel the wait as 'idle'; and if the
+      // method were ever absent, Promise.resolve(undefined) would settle
+      // immediately as a false 'idle'. The idle case is already fully covered:
+      // the alreadyIdle check above (nothing pending, no turn/end to come) and
+      // the poll fallback below (seq advanced + idle).
       const settled = await new Promise((resolve) => {
         let done = false
         let timer
@@ -480,7 +504,7 @@ export function apply(ctx) {
           done = true
           if (timer !== undefined) clearTimeout(timer)
           if (poll !== undefined) clearInterval(poll)
-          dispose()
+          if (dispose !== undefined) dispose()
           resolve(outcome)
         }
 
@@ -498,15 +522,8 @@ export function apply(ctx) {
           { global: true },
         )
 
-        // Path 2: the agent quiesced with nothing left to do. Covers a resumed
-        // Session whose turn already ended before we started listening.
-        Promise.resolve(agent.whenIdle?.()).then(
-          () => finish({ kind: 'idle', endSeq: agent.session.seq }),
-          () => finish({ kind: 'idle', endSeq: agent.session.seq }),
-        )
-
-        // Path 3: belt and braces. turn/end appends durably, so a seq advance
-        // past the snapshot means a turn completed even if the event listener
+        // Path 2 (fallback): turn/end appends durably, so a seq advance past
+        // the snapshot means a turn completed even if the event listener
         // missed the frame (cold resume, reconnect, listener registered late).
         // Neither timer is unref'd: an active wait must keep the process alive,
         // and unref'd timers let a pending await hang forever if the loop empties.
@@ -517,7 +534,13 @@ export function apply(ctx) {
         }, 1000)
 
         timer = setTimeout(() => finish({ kind: 'timeout' }), timeoutMs)
-        exec.signal?.addEventListener?.('abort', () => finish({ kind: 'timeout' }), { once: true })
+        // Caller cancellation is its own outcome, not a timeout — the receipt
+        // must not tell the model to "wait longer" for a wait it cancelled.
+        exec.signal?.addEventListener?.(
+          'abort',
+          () => finish({ kind: 'cancelled', reason: exec.signal?.reason }),
+          { once: true },
+        )
       })
 
       if (settled.kind === 'timeout') {
@@ -527,6 +550,9 @@ export function apply(ctx) {
             ? 'It is still running — call session_dm_wait again with a larger timeout_seconds.'
             : 'It is not running but did not report a turn end; read its state with session_event_read.',
         ].join('\n')
+      }
+      if (settled.kind === 'cancelled') {
+        return `Wait for session ${targetId} was cancelled before the target settled.`
       }
       return waitReceipt(targetId, header?.title, settled.kind, settled)
     },
