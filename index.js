@@ -53,15 +53,17 @@ const SOURCE_KIND = 'session-dm'
 
 /** Short model guidance; one stable section keeps the request prefix cacheable. */
 const PROMPT_TEXT =
-  'Cross-session tools: session_dm_send messages another Session in the same workspace (hand off work, ' +
-  'ask a parallel Session a question, or relay a result). Its mode decides placement: queue waits for the ' +
-  "target's next turn, steer interjects into the target's current turn while it is running (read at the " +
-  "model's next step; falls back to queue when the target is idle). session_create starts a NEW top-level " +
-  'Session in the same workspace and delivers your prompt as its first user input — use it when the work ' +
-  'deserves a fresh conversation rather than burdening an existing one. session_dm_wait blocks until ' +
-  'another Session finishes its current turn, so after sending work you can wait for it instead of ' +
-  'sleeping. Delivery confirms acceptance, not a reply; to read what another Session said back, use ' +
-  'session_search or session_event_read on its id.'
+  'Cross-session tools — FIRST decide between a subagent and a new Session: for ordinary subtasks whose ' +
+  'result you consume yourself (parallel pieces, quick questions, anything that should return into your ' +
+  'context directly), use a subagent (the workflow or send_message tools), NOT these. Reserve these tools ' +
+  'for work that should be a USER-VISIBLE, INDEPENDENT conversation: it must outlive or escape your turn, ' +
+  'the user should see and revisit it in the Session list, or it needs its own fresh context window for a ' +
+  'long task. A new Session\'s output does NOT return to you automatically — you must session_dm_wait and ' +
+  'then session_event_read to retrieve it. session_dm_send messages another Session in the same workspace ' +
+  "(mode: queue waits for the target's next turn; steer interjects into its current turn while running, " +
+  "read at the model's next step; falls back to queue when idle). session_create starts a NEW top-level " +
+  'Session in the same workspace and delivers your prompt as its first user input. session_dm_wait blocks ' +
+  'until another Session finishes its current turn. Delivery confirms acceptance, not a reply.'
 
 const TEXT_OUTPUT = {
   schema: { type: 'string' },
@@ -213,9 +215,11 @@ export function apply(ctx) {
   const tool = {
     name: 'session_dm_send',
     description:
-      'Send a text message into another Session in the same workspace. mode "queue" (default) waits for the ' +
-      "target's next turn; mode \"steer\" interjects into the target's CURRENT turn while it is running, so " +
-      'the model reads it at its next step. The receipt confirms acceptance, not an answer.',
+      'Message an EXISTING top-level Session in the same workspace — for work that must be a user-visible, ' +
+      'independent conversation, not for ordinary subtasks (use a subagent for those; its result returns to ' +
+      'you directly, this does not). mode "queue" (default) waits for the target\'s next turn; mode "steer" ' +
+      'interjects into the target\'s CURRENT turn while it is running, so the model reads it at its next ' +
+      'step. The receipt confirms acceptance, not an answer.',
     // 🔴 必须是**完整 JSON Schema**（type/properties/required/additionalProperties），
     //    不能写宿主 defineTool 的简写格式（`{ field: { type, required: true } }`）：
     //    本插件为保持零依赖没有走 defineTool，裸注册时没有任何一层做 spec→JSONSchema
@@ -329,10 +333,12 @@ export function apply(ctx) {
   const createTool = {
     name: 'session_create',
     description:
-      'Start a NEW top-level Session (a fresh conversation, not a subagent) in the same workspace as the ' +
-      'calling Session and deliver a first prompt to it. The new Session runs independently: it is visible ' +
-      'in the Session list, and its output can be read later with session_search or session_event_read. ' +
-      'Use it to fan work out into a dedicated conversation.',
+      'Start a NEW top-level Session (a fresh conversation, never a subagent) in the same workspace as the ' +
+      'calling Session and deliver a first prompt to it. Choose this over a subagent ONLY when the work ' +
+      'should be a user-visible, independent conversation that outlives your turn or needs its own fresh ' +
+      'context window — for ordinary subtasks whose result you consume yourself, a subagent is the right ' +
+      'tool. The new Session runs independently: it is visible in the Session list, and its output does NOT ' +
+      'return to you automatically (read it later with session_dm_wait + session_event_read).',
     parameters: {
       type: 'object',
       properties: {
@@ -440,9 +446,10 @@ export function apply(ctx) {
     name: 'session_dm_wait',
     description:
       'Block until another Session finishes its current turn, then return what happened (turn end reason, ' +
-      'last assistant text, or the Session error). Use it after session_dm_send or session_create so you can ' +
-      'wait for the other Session instead of sleeping and guessing. Returns as soon as the target is idle if ' +
-      'it has no work pending; times out if the target neither finishes nor idles.',
+      'last assistant text, or the Session error). Pair it with session_dm_send or session_create when you ' +
+      'handed work to a user-visible Session and need to know when it lands — a subagent would have returned ' +
+      'its result directly, which is why ordinary subtasks should prefer a subagent. Times out if the target ' +
+      'neither finishes nor idles.',
     parameters: {
       type: 'object',
       properties: {
