@@ -58,10 +58,10 @@ dsh plugin --profile <你的 profile> add github:Venshell/dsh-session-dm
 
 ### 方式三：从 Release 附件装
 
-去 [Releases](https://github.com/Venshell/dsh-session-dm/releases) 下 `dsh-session-dm-0.4.1.tgz`：
+去 [Releases](https://github.com/Venshell/dsh-session-dm/releases) 下 `dsh-session-dm-0.5.1.tgz`：
 
 ```powershell
-dsh plugin --profile <你的 profile> add <下载路径>\dsh-session-dm-0.4.1.tgz
+dsh plugin --profile <你的 profile> add <下载路径>\dsh-session-dm-0.5.1.tgz
 ```
 
 ### 方式四：从源码目录装
@@ -162,7 +162,7 @@ profile 里装的这个插件是指向仓库目录的符号链接，所以源码
 
 ## 兼容性
 
-在 DeepSeek Harness 0.2.x 桌面版 profile（Windows）上开发和验证。它摸的宿主接口（`sessionController.create` / `resolveAgent` / `rename`、`agent.followup`、`sessions.flush`、`workspaceRegistry.list`）都是内部缝隙，跨版本可能变——真变了：核心投递/建会话路径会**大声失败**；只有三处刻意 best-effort（工作区查找、收据标题、改名）静默降级并留了回退路径。
+声明 `engines.dsh: ">=0.2.1-rc.5"`：宿主 0.2.1-rc.5（含）到 0.2.2-rc.1 均已逐 API 验证兼容，插件管理器会按此声明拒绝更老的宿主。它摸的宿主接口（`sessionController.create` / `resolveAgent` / `selectModel` / `rename`、`agent.followup` / `steer`、`sessions.flush`、`workspaceRegistry.list`）都是内部缝隙，跨版本可能变——真变了：核心投递/建会话路径会**大声失败**；只有三处刻意 best-effort（工作区查找、收据标题、改名）静默降级并留了回退路径。
 
 ---
 
@@ -264,7 +264,7 @@ Zero dependencies — the only import is `node:crypto`.
 
 ### Compatibility
 
-Developed and tested against a DeepSeek Harness 0.2.x desktop profile (Windows). The host seams it touches are internal and may shift between versions — the core delivery and creation paths fail loudly when they do; three deliberate best-effort spots (workspace lookup, receipt title, rename) degrade silently with documented fallbacks.
+Declares `engines.dsh: ">=0.2.1-rc.5"`: verified API-by-API compatible with host 0.2.1-rc.5 (inclusive) through 0.2.2-rc.1; the plugin manager rejects older hosts on this declaration. The host seams it touches are internal and may shift between versions — the core delivery and creation paths fail loudly when they do; three deliberate best-effort spots (workspace lookup, receipt title, rename) degrade silently with documented fallbacks.
 
 ---
 

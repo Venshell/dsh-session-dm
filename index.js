@@ -518,15 +518,16 @@ export function apply(ctx) {
           resolve(outcome)
         }
 
-        // Path 1: the durable turn/end for this Session.
+        // Path 1: the durable turn/end for this Session. A failed turn is
+        // reported on this same event with reason.kind === 'error' (the host
+        // declares no separate session/agent error event type), so one
+        // subscription covers success and failure alike.
         const dispose = ctx.on(
           'session/event',
           (session, event) => {
             if (session.id !== targetId) return
             if (event.type === 'turn/end') {
               finish({ kind: 'turn-end', reason: event.data?.reason, endSeq: event.seq })
-            } else if (event.type === 'agent/error' || event.type === 'session/error') {
-              finish({ kind: 'error', error: event.data })
             }
           },
           { global: true },
@@ -694,18 +695,14 @@ export function apply(ctx) {
  * Render what a finished wait observed.
  * @param targetId - the Session that settled.
  * @param title - its display title, when known.
- * @param kind - how the wait settled (turn-end, idle, error).
+ * @param kind - how the wait settled (turn-end or idle; timeout and
+ *   cancelled are answered before this renders).
  * @param settled - the observed sequence and failure details.
  * @returns the model-facing receipt.
  */
 function waitReceipt(targetId, title, kind, settled) {
   const label = typeof title === 'string' && title.length > 0 ? `${targetId} — ${title}` : targetId
   const when = typeof settled.endSeq === 'number' ? ` (session seq ${settled.endSeq})` : ''
-  if (kind === 'timeout') return `Session ${label} did not settle.`
-  if (kind === 'error') {
-    const message = settled.error?.message ?? settled.error?.error?.message ?? JSON.stringify(settled.error ?? null)
-    return `Session ${label} failed${when}: ${message}`
-  }
   if (kind === 'idle') {
     return [
       `Session ${label} is idle${when} — nothing is pending, so there was nothing to wait for.`,
@@ -713,9 +710,13 @@ function waitReceipt(targetId, title, kind, settled) {
     ].join('\n')
   }
   const reason = settled.reason?.kind ?? settled.reason ?? 'completed'
+  const failure =
+    reason === 'error' && settled.reason?.error !== undefined
+      ? ` Failure: ${settled.reason.error.message ?? JSON.stringify(settled.reason.error)}.`
+      : ''
   return [
     `Session ${label} finished its turn${when}.`,
-    `End reason: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}.`,
+    `End reason: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}.${failure}`,
     'Read its reply with session_search or session_event_read on this id.',
   ].join('\n')
 }
